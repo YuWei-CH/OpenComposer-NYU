@@ -231,7 +231,7 @@ ocForm.addSelectedItem = function(id, updateValuesFlag = true) {
 };
 
 // Load files and updates the file selector interface dynamically.
-ocForm.loadFiles = function(scriptName, currentPath, type, key, showFiles, homeDir, isFromButton) {
+ocForm.loadFiles = function(scriptName, currentPath, key, showFiles, homeDir, isFromButton) {
   const selectedPath = document.getElementById("oc-modal-data-" + key);
   if (isFromButton) {
     currentPath = selectedPath.dataset.path;
@@ -242,22 +242,29 @@ ocForm.loadFiles = function(scriptName, currentPath, type, key, showFiles, homeD
   const linkedParts = parts.map(part => {
     if (part) {
       subPath += "/" + part;
-      return ` <a href="#" onclick="ocForm.loadFiles('${scriptName}', '${subPath}', '${type}', '${key}', ${showFiles}, '${homeDir}', false)">${part}</a> `;
+      return ` <a href="#" onclick="ocForm.loadFiles('${scriptName}', '${subPath}', '${key}', ${showFiles}, '${homeDir}', false)">${part}</a> `;
     }
     else {
       return ''; // Avoid empty string for root directory
     }
   });
-
-  selectedPath.dataset.path = currentPath;
-  selectedPath.innerHTML = `<a href='#' onclick="ocForm.loadFiles('${scriptName}', '${homeDir}', '${type}', '${key}', ${showFiles}, '${homeDir}', false)">&#x1f3e0;</a> `;
-  selectedPath.innerHTML += linkedParts.join('/');
   
-  if (type === 'directory' && !selectedPath.dataset.path.endsWith("/")) {
-    selectedPath.dataset.path += "/";
-    selectedPath.innerHTML += "/";
-  }
+  const files_or_directory = scriptName + "/_file_or_directory";
+  fetch(`${files_or_directory}?path=${encodeURIComponent(currentPath)}`)
+    .then(response => response.json())
+    .then(data => {
+      selectedPath.dataset.path = currentPath;
+      selectedPath.innerHTML = `<a href='#' onclick="ocForm.loadFiles('${scriptName}', '${homeDir}', '${key}', ${showFiles}, '${homeDir}', false)">&#x1f3e0;</a> `;
+      const parentPath = currentPath.replace(/\/+$/, '').split('/').slice(0, -1).join('/') || '/';
+      selectedPath.innerHTML += `<a href='#' onclick="ocForm.loadFiles('${scriptName}', '${parentPath}', '${key}', ${showFiles}, '${homeDir}', false)" style="text-decoration:none;">&#x2B06;&#xFE0F;</a> `;
+      selectedPath.innerHTML += linkedParts.join('/');
 
+      if (data.type === 'directory' && !selectedPath.dataset.path.endsWith("/")) {
+        selectedPath.dataset.path += "/";
+        selectedPath.innerHTML += "/";
+      }
+    });
+  
   const checkbox = document.getElementById("oc-modal-checkbox-" + key);
   const filespath = scriptName + "/_files";
   fetch(`${filespath}?path=${encodeURIComponent(currentPath)}`)
@@ -281,11 +288,10 @@ ocForm.loadFiles = function(scriptName, currentPath, type, key, showFiles, homeD
         link.href = '#';
         link.textContent = file.name;
         link.dataset.path = file.path;
-        link.dataset.type = file.type;
         
         link.onclick = function(e) {
           e.preventDefault();
-          ocForm.loadFiles(scriptName, file.path, file.type, key, showFiles, homeDir, false);
+          ocForm.loadFiles(scriptName, file.path, key, showFiles, homeDir, false);
         };
 
         pathCell.appendChild(link);
@@ -326,7 +332,7 @@ ocForm.handleRowClick = function(event, key, showFiles, scriptName, homeDir) {
 
   if (target && target.nodeName === "TR") {
     const t = target.querySelector('td:nth-child(2) a');
-    ocForm.loadFiles(scriptName, t.dataset.path, t.dataset.type, key, showFiles, homeDir, false);
+    ocForm.loadFiles(scriptName, t.dataset.path, key, showFiles, homeDir, false);
   }
 };
 
@@ -412,17 +418,33 @@ ocForm.getParentDiv = function(key, widget, size) {
 
 // Show a widget.
 ocForm.showWidget = function(key, widget, size) {
-  const parent = ocForm.getParentDiv(key, widget, size);
-  if (parent) {
-    parent.style.display = 'block';
+  if (key === "_script_content") {
+    document.getElementById(key).style.display = 'block';
+    document.getElementById("label_" + key).style.display = 'block';
+    document.getElementById('_form_layout').classList.add('row-cols-md-2');
+    document.getElementById("_form_container").style.removeProperty("max-width");
+  }
+  else {
+    const parent = ocForm.getParentDiv(key, widget, size);
+    if (parent) {
+      parent.style.display = 'block';
+    }
   }
 };
 
 // Hide a widget.
 ocForm.hideWidget = function(key, widget, size) {
-  const parent = ocForm.getParentDiv(key, widget, size);
-  if (parent) {
-    parent.style.display = 'none';
+  if (key === "_script_content") {
+    document.getElementById(key).style.display = 'none';
+    document.getElementById("label_" + key).style.display = 'none';
+    document.getElementById('_form_layout').classList.remove('row-cols-md-2');
+    document.getElementById("_form_container").style.maxWidth = '800px';
+  }
+  else {
+    const parent = ocForm.getParentDiv(key, widget, size);
+    if (parent) {
+      parent.style.display = 'none';
+    }
   }
 };
 
@@ -558,6 +580,17 @@ ocForm.showLine = function(selectedValues, line, keys, widgets, canHide, separat
 
   for (const k in keys) {
     let value = ocForm.getValue(keys[k], widgets[k]);
+    if (!Array.isArray(value)) { // If nothing is checked in the checkbox, value = [].
+      const escapeSequences = {
+	"\\n": "\n",
+	"\\t": "\t",
+	"\\r": "\r",
+	"\\\\": "\\",
+	"\\\"": "\"",
+	"\\'": "'"
+      };
+      value = value.replace(/\\[ntr\\'"]/g, match => escapeSequences[match]);
+    }
 
     if (functions[k] === "dirname") {
       value = ocForm.dirname(value);
@@ -577,7 +610,7 @@ ocForm.showLine = function(selectedValues, line, keys, widgets, canHide, separat
       switch (widgets[k]) {
       case "checkbox":
       case "multi_select":
-        if (separators[k]) {
+        if (separators[k] !== null){
           let tmp_value = "";
           for (let i = 0; i < value.length; i++) {
             tmp_value += value[i];
@@ -956,7 +989,6 @@ ocForm.updatePath = function(key) {
   document.getElementById(key).value = document.getElementById("oc-modal-data-" + key).dataset.path;
   ocForm.updateValues(key);
 };
-
 
 // If a checkbox widget has `required: true` attribute and none are checked,
 // disable the submit button. If any are checked, enable the submit button.

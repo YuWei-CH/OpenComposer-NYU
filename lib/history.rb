@@ -12,15 +12,15 @@ helpers do
         
         # Generate icon HTML based on whether it's a Bootstrap/Font Awesome icon or an image
         icon_html = if is_bi_or_fa_icon
-                      "<i class=\"#{value}\"></i>"
+                      "<i class=\"#{value} fs-5\"></i>"
                     else
-                      "<img width=14 alt=\"#{key}\" src=\"#{icon_path}\">"
+                      "<img width=20 title=\"#{key}\" alt=\"#{key}\" src=\"#{icon_path}\">"
                     end
       else
         # Handle cases where app is not a hash (direct app name)
         key = app
         href = "#{@my_ood_url}/pun/sys/dashboard/batch_connect/sys/#{key}"
-        icon_html = "<img width=14 alt=\"#{key}\" src=\"#{@my_ood_url}/pun/sys/dashboard/apps/icon/#{key}/sys/sys\">"
+        icon_html = "<img width=20 title=\"#{key}\" alt=\"#{key}\" src=\"#{@my_ood_url}/pun/sys/dashboard/apps/icon/#{key}/sys/sys\">"
       end
       
       # Return the full HTML string for the link
@@ -78,8 +78,8 @@ helpers do
       [JOB_NAME,            job[JOB_NAME]],
       ["Application",       job[JOB_APP_NAME]],
       [JOB_PARTITION,       job[JOB_PARTITION]],
-      ["Script Location",   job[HEAD_SCRIPT_LOCATION]],
-      ["Script Name",       job[HEAD_SCRIPT_NAME]],
+      ["Script Location",   job[HEADER_SCRIPT_LOCATION]],
+      ["Script Name",       job[HEADER_SCRIPT_NAME]],
       [JOB_SUBMISSION_TIME, job[JOB_SUBMISSION_TIME]],
       [JOB_STATUS_ID,       job[JOB_STATUS_ID]]
     ]
@@ -117,7 +117,7 @@ helpers do
   # Output a modal displaying a job script and a link to load parameters for a specific job.
   def output_job_script_modal(job)
     modal_id = "_historyJobScript#{job[JOB_ID]}"
-    job_script = job[JOB_SCRIPT_CONTENTS].gsub(/\r\n|\n/, '<br>')
+    job_script = job[SCRIPT_CONTENT]&.gsub(/\r\n|\n/, '<br>')
     job_link = "#{@script_name}#{job[JOB_APP_PATH]}?jobId=#{URI.encode_www_form_component(job[JOB_ID])}"
 
     <<~HTML
@@ -199,8 +199,22 @@ helpers do
     html += "</nav>\n"
   end
 
+  # Return the number of Job IDs stored in the database.
+  def get_job_size()
+    history_db = @conf["history_db"]
+    return 0 unless File.exist?(history_db)
+
+    size = 0
+    db = PStore.new(history_db)
+    db.transaction(true) do
+      size = db.roots.size
+    end
+
+    return size
+  end
+  
   # Query a job history based on the target status and filter.
-  def get_job_history(target_status, filter)
+  def get_job_history(target_status, start_index, end_index, filter)
     history_db = @conf["history_db"]
     return [] unless File.exist?(history_db)
     db = PStore.new(history_db)
@@ -209,7 +223,7 @@ helpers do
     if target_status != "completed"
       queried_ids = []
       db.transaction(true) do
-        db.roots.each do |id|
+        db.roots.reverse[start_index...(end_index+1)].each do |id|
           queried_ids << id if db[id][JOB_STATUS_ID] != JOB_STATUS["completed"]
         end
       end
@@ -229,18 +243,18 @@ helpers do
         end
       end
     end
-    
+
     jobs = []
     db.transaction(true) do
-      db.roots.each do |id|
+      db.roots.reverse[start_index...(end_index+1)].each do |id|
         data = db[id]
         next if (data[JOB_STATUS_ID]&.downcase != target_status && target_status != "all")
 
         info = { JOB_ID => id }
         info.merge!(data)
-        next if filter && !info[HEAD_SCRIPT_NAME]&.include?(filter) && !info[JOB_NAME]&.include?(filter)
+        next if filter && !info[HEADER_SCRIPT_NAME]&.include?(filter) && !info[JOB_NAME]&.include?(filter)
         
-        jobs.unshift(info)
+        jobs.push(info)
       end
     end
 

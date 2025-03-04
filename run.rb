@@ -12,23 +12,24 @@ set :environment, :production
 set :erb, trim: "-"
 
 # Internal Constants
-VERSION              = "1.2.0"
-SCHEDULERS_DIR_PATH  = "./lib/schedulers"
-HISTORY_ROWS         = 10
-JOB_STATUS           = { "queued" => "QUEUED", "running" => "RUNNING", "completed" => "COMPLETED" }
-JOB_ID               = "id"
-JOB_APP_NAME         = "appName"
-JOB_APP_PATH         = "appPath"
-JOB_STATUS_ID        = "status"
-HEAD_SCRIPT_LOCATION = "_script_location"
-HEAD_SCRIPT_NAME     = "_script_1"
-HEAD_JOB_NAME        = "_script_2"
-JOB_SCRIPT_CONTENTS  = "_script_contents"
-SUBMIT_BUTTON        = "_submitButton"
-JOB_NAME             = "Job Name"
-JOB_SUBMISSION_TIME  = "Submission Time"
-JOB_PARTITION        = "Partition"
-JOB_KEYS             = "job_keys"
+VERSION                = "1.3.0"
+SCHEDULERS_DIR_PATH    = "./lib/schedulers"
+HISTORY_ROWS           = 10
+JOB_STATUS             = { "queued" => "QUEUED", "running" => "RUNNING", "completed" => "COMPLETED" }
+JOB_ID                 = "id"
+JOB_APP_NAME           = "appName"
+JOB_APP_PATH           = "appPath"
+JOB_STATUS_ID          = "status"
+HEADER_SCRIPT_LOCATION = "_script_location"
+HEADER_SCRIPT_NAME     = "_script_1"
+HEADER_JOB_NAME        = "_script_2"
+SCRIPT_CONTENT         = "_script_content"
+FORM_LAYOUT            = "_form_layout"
+SUBMIT_BUTTON          = "_submitButton"
+JOB_NAME               = "Job Name"
+JOB_SUBMISSION_TIME    = "Submission Time"
+JOB_PARTITION          = "Partition"
+JOB_KEYS               = "job_keys"
 
 # Structure of manifest
 Manifest = Struct.new(:dirname, :name, :category, :description, :icon, :related_app)
@@ -69,6 +70,9 @@ def create_conf
   conf["category_color"]    ||= "#5522BB"
   conf["description_color"] ||= conf["category_color"]
   conf["form_color"]        ||= "#BFCFE7"
+
+  # Set special environment variables for Grid Engine
+  ENV['SGE_ROOT'] ||= conf["sge_root"]
 
   conf["history_db"] = File.join(conf["data_dir"], conf["scheduler"] + ".db")
   return conf
@@ -156,26 +160,30 @@ def show_website(job_id = nil, scheduler = nil, error_msg = nil, error_params = 
     @ssh_wrapper      = @conf["ssh_wrapper"]
     @status           = params["status"] || "all"
     @filter           = params["filter"]
-    @jobs, @error_msg = get_job_history(@status, @filter)
+    @jobs_size        = get_job_size()
+    @rows             = [[(params["rows"] || HISTORY_ROWS).to_i, 1].max, @jobs_size].min
+    @page_size        = (@rows == 0) ? 1 : ((@jobs_size - 1) / @rows) + 1
+    @current_page     = (params["p"] || 1).to_i
+    @start_index      = (@jobs_size == 0) ? 0 : (@current_page - 1) * @rows
+    @end_index        = (@jobs_size == 0) ? 0 : [@current_page * @rows, @jobs_size].min - 1
+    @jobs, @error_msg = get_job_history(@status, @start_index, @end_index, @filter)
 
     if !@error_msg.nil?
       erb :error
     else
-      @error_msg    = error_msg
-      @jobs_size    = @jobs&.size || 0
-      @rows         = [[(params["rows"] || HISTORY_ROWS).to_i, 1].max, @jobs_size].min
-      @page_size    = (@rows == 0) ? 1 : ((@jobs_size - 1) / @rows) + 1
-      @current_page = (params["p"] || 1).to_i
-      @start_index  = (@jobs_size == 0) ? 0 : (@current_page - 1) * @rows + 1
-      @end_index    = [@current_page * @rows, @jobs_size].min
+      @error_msg = error_msg
       erb :history
     end
-  else
+  else # application form
     @manifest = @manifests.find { |m| "/#{m.dirname}" == @path_info }
     if !@manifest.nil?
-      @name = @manifest["name"]
-      @head = read_yaml("./lib/head.yml")
-      @body = read_yaml(File.join(@apps_dir, @path_info, "form.yml"))
+      @name   = @manifest["name"]
+      @body   = read_yaml(File.join(@apps_dir, @path_info, "form.yml"))
+      @header = if @body.key?("header")
+                  @body["header"]
+                else
+                  read_yaml("./lib/header.yml")["header"]
+                end
 
       # Since the widget name is used as a variable in Ruby, it should consist of only
       # alphanumeric characters and underscores, and numbers should not be used at the
@@ -187,7 +195,7 @@ def show_website(job_id = nil, scheduler = nil, error_msg = nil, error_params = 
       end
       
       # Load cache
-      @script_contents = nil
+      @script_content = nil
       if params["jobId"] || job_id
         history_db = @conf["history_db"]
         halt 404, "#{history_db} is not found." unless File.exist?(history_db)
@@ -202,13 +210,18 @@ def show_website(job_id = nil, scheduler = nil, error_msg = nil, error_params = 
           cache = db[id]
           halt 404, "Specified Job ID (#{id}) is not found." if cache.nil?
         end        
-        replace_with_cache(@head["form"], cache)
+        replace_with_cache(@header, cache)
         replace_with_cache(@body["form"], cache)
-        @script_contents = cache[JOB_SCRIPT_CONTENTS]
+        @script_content = cache[SCRIPT_CONTENT]
       elsif !error_msg.nil?
-        replace_with_cache(@head["form"], error_params)
+        replace_with_cache(@header, error_params)
         replace_with_cache(@body["form"], error_params)
-        @script_contents = error_params[JOB_SCRIPT_CONTENTS]
+        @script_content = error_params[SCRIPT_CONTENT]
+      end
+
+      @script_label = @body["script"].is_a?(Hash) ? @body["script"]["label"] : "Script Content"
+      if @body["script"].is_a?(Hash) && @body["script"].key?("content")
+        @body["script"] = @body["script"]["content"]
       end
 
       @table_index = 1
@@ -228,7 +241,6 @@ get "/:apps_dir/:folder/:icon" do
   send_file(icon_path) if File.exist?(icon_path)
 end
 
-# This is used for the path widget in web forms.
 # Return a list of files and/or directories in JSON format.
 get "/_files" do
   path = params[:path] || "."
@@ -248,6 +260,18 @@ get "/_files" do
   { files: entries }.to_json
 end
 
+# Return whether the specified PATH is a file or a directory.
+get "/_file_or_directory" do
+  path = params[:path] || "."
+  content_type :json
+
+  if File.file?(path)
+    { type: "file" }.to_json
+  else
+    { type: "directory" }.to_json
+  end
+end
+    
 get "/*" do
   show_website
 end
@@ -281,39 +305,99 @@ post "/*" do
 
     show_website(nil, scheduler, error_msg)
   else
-    script_location = params[HEAD_SCRIPT_LOCATION]
-    script_name     = params[HEAD_SCRIPT_NAME]
-    job_name        = params[HEAD_JOB_NAME]
-    script_path     = File.join(script_location, script_name)
-    script_contents = params[JOB_SCRIPT_CONTENTS].gsub("\r\n", "\n")
-    job_id    = nil
-    error_msg = nil
-
-    # Run commands in check block
-    params.each do |key, value|
-      k = case key
-          when HEAD_SCRIPT_LOCATION then "_SCRIPT_LOCATION"
-          when HEAD_SCRIPT_NAME     then "_SCRIPT_NAME"
-          when HEAD_JOB_NAME        then "_JOB_NAME"
-          else key
-          end
-      instance_variable_set("@#{k}", value)
-    end
-
     app_path = File.join(conf["apps_dir"], request.path_info)
-    check    = read_yaml(File.join(app_path, "form.yml"))["check"]
-    eval(check) unless check.nil?
+    
+    script_location = params[HEADER_SCRIPT_LOCATION]
+    script_name     = params[HEADER_SCRIPT_NAME]
+    job_name        = params[HEADER_JOB_NAME]
+    halt 500, "#{HEADER_SCRIPT_LOCATION} is not defined in #{app_path}/form.yml[.erb]." if script_location.nil?
+    halt 500, "#{HEADER_SCRIPT_NAME} is not defined in #{app_path}/form.yml[.erb]."     if script_name.nil?
+    halt 500, "#{HEADER_JOB_NAME} is not defined in #{app_path}/form.yml[.erb]."        if job_name.nil?
+    
+    script_path    = File.join(script_location, script_name)
+    script_content = params[SCRIPT_CONTENT].gsub("\r\n", "\n")
+    job_id         = nil
+    error_msg      = nil
+    form           = read_yaml(File.join(app_path, "form.yml"))
+    submit_options = nil
+    
+    # Run commands in check block
+    check = form["check"]
+    unless check.nil?
+      params.each do |key, value|
+        next if ['splat', SCRIPT_CONTENT].include?(key)
+        
+        suffix = case key
+                 when JOB_APP_NAME           then "OC_APP_NAME"
+                 when JOB_APP_PATH           then "OC_APP_PATH"
+                 when HEADER_SCRIPT_LOCATION then "OC_SCRIPT_LOCATION"
+                 when HEADER_SCRIPT_NAME     then "OC_SCRIPT_NAME"
+                 when HEADER_JOB_NAME        then "OC_JOB_NAME"
+                 else key
+                 end
+
+        instance_variable_set("@#{suffix}", value)
+      end
+
+      eval(check)
+    end
+    
+    # Run commands in submit block
+    submit = form["submit"]
+    unless submit.nil?
+      replacements = params.each_with_object({}) do |(key, value), env|
+        next if ['splat', SCRIPT_CONTENT].include?(key)
+        
+        suffix = case key
+                 when JOB_APP_NAME           then "OC_APP_NAME"
+                 when JOB_APP_PATH           then "OC_APP_PATH"
+                 when HEADER_SCRIPT_LOCATION then "OC_SCRIPT_LOCATION"
+                 when HEADER_SCRIPT_NAME     then "OC_SCRIPT_NAME"
+                 when HEADER_JOB_NAME        then "OC_JOB_NAME"
+                 else key
+                 end
+        
+        env[suffix] = value
+      end
+
+      replacements.each do |key, value|
+        if form.dig("form", key)
+          widget = form["form"][key]["widget"]
+          
+          if ["select", "radio", "checkbox"].include?(widget) # TODO: Add support for "multi_select"
+            options = form["form"][key]["options"]
+            
+            options.each do |option|
+              if option.is_a?(Array) && value.to_s == option[0]
+                value = option[1] if option.size > 1
+              end
+            end
+          end
+        end
+
+        submit.gsub!(/\#\{#{key}\}/, value.to_s)
+      end
+
+      submit_with_echo = <<~BASH
+        #{submit}
+        if [ -n "$OC_SUBMIT_OPTIONS" ]; then
+          echo "$OC_SUBMIT_OPTIONS"
+        else
+          echo "__UNDEFINED__"
+        fi
+        BASH
+      
+      submit_options = `bash -c '#{submit_with_echo}' | tail -n 1`.strip
+      submit_options = nil if submit_options == "__UNDEFINED__"
+    end
 
     # Save a job script
     FileUtils.mkdir_p(script_location)
-    File.open(script_path, "w") { |file| file.write(script_contents) }
+    File.open(script_path, "w") { |file| file.write(script_content) }
 
     # Submit a job script
     Dir.chdir(File.dirname(script_path)) do
-      # Run preprocessing commands in submit.yml
-      prep = read_yaml(File.join(app_path, "submit.yml"))
-      system(prep["script"]) if prep&.dig("script")
-      job_id, error_msg = scheduler.submit(script_path, job_name, bin, bin_overrides, ssh_wrapper)
+      job_id, error_msg = scheduler.submit(script_path, job_name.strip, submit_options, bin, bin_overrides, ssh_wrapper)
       params[JOB_SUBMISSION_TIME] = Time.now.strftime("%Y-%m-%d %H:%M:%S")
     end
 
